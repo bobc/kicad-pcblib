@@ -61,6 +61,7 @@ VERSION="1.0"
 TEXT_SIZE = 1.
 TEXT_THICK = 0.2
 
+VERBOSE = 0
 
 class SexpSymbol (object):
     """An s-expression symbol. This is a bare text object which is exported
@@ -74,6 +75,9 @@ class SexpSymbol (object):
 
     def __repr__ (self):
         return "SexpSymbol(%r)" % self.s
+
+    def value (self):
+        return self.s;
 
 # For short code
 S = SexpSymbol
@@ -95,13 +99,16 @@ def SexpDump (sexp, f, indentlevel=0):
             SexpDump (i, f, indentlevel + 1)
         f.write (")")
 
+        if indentlevel == 1 :
+            f.write("\n")
+
     elif isinstance (sexp, (str, unicode)):
         f.write ('"')
         f.write (sexp.encode ("unicode_escape").decode ("ascii"))
         f.write ('"')
 
     else:
-        f.write (str (sexp))
+        f.write (str(sexp))
 
 def indent_string (s):
     """Put two spaces before each line in s"""
@@ -127,15 +134,21 @@ def parse_string (s):
             extra_garbage = len (beyond) - len (beyond_stripped)
             return s[1:second_quote], second_quote + 1 + extra_garbage
 
-def to_mm (n):
-    """Convert FreePCB integer nanometers to floating millimeters"""
-    # Oh, KiCad... You wanted to get rid of Imperial units, so you replaced
-    # them with.... floating-point millimeters?! Integer nanometers seems
-    # pretty good...
-    return float(n) / 1000000.
+def to_mm (n, units = "NM"):
+    """Convert FreePCB units to floating millimeters"""
+
+    if units == "NM":
+        return float(n) / 1000000.
+    elif units == "MM":
+        return float(n)
+    elif units == "MIL":
+        return float(n) * 0.0254
+
+    return 
 
 def from_mm (n):
     return float(n) * 1000000.
+
 
 class Library (object):
     def __init__ (self, file_in=None, opts=None):
@@ -145,6 +158,7 @@ class Library (object):
         elif file_in is not None and opts is not None:
             self.opts = opts
 
+            file_in.get_string (allow_blank=False)
             while not file_in.at_end ():
                 self.Modules.append (PCBmodule (file_in, opts))
         else:
@@ -187,23 +201,25 @@ class PCBmodule (object):
         self.Source = ""
         self.Description = ""
 
-        while not file_in.indent_level () and not file_in.at_end ():
-            key, value = file_in.get_string (allow_blank=False)
-            if key == "name":
-                self.Name = value
-            elif key == "author":
-                self.Author = value
-            elif key == "source":
-                self.Source = value
-            elif key == "description":
-                self.Description = value
+        # key, value = file_in.get_string (allow_blank=False)
+
+        while not file_in.key == "units" and not file_in.at_end ():
+            if file_in.key == "name":
+                self.Name = file_in.value
+            elif file_in.key == "author":
+                self.Author = file_in.value
+            elif file_in.key == "source":
+                self.Source = file_in.value
+            elif file_in.key == "description":
+                self.Description = file_in.value
             else:
                 raise Exception ("Unexpected key \"%s\" on line %d."
-                        % (key, file_in.Lineno - 1))
+                        % (file_in.key, file_in.Lineno - 1))
+            file_in.get_string (allow_blank=False)
                 
         assert self.Name
-        assert self.Author
-        assert self.Source
+        #assert self.Author
+        #assert self.Source
         #assert self.Description
 
         # Post-indent data
@@ -214,39 +230,50 @@ class PCBmodule (object):
         self.Centroid = "0 0 0 0"
         self.Graphics = []
 
-        while file_in.indent_level () and not file_in.at_end ():
-            key = file_in.peek_key ()
-            if key == "units":
-                key, value = file_in.get_string (allow_blank=False)
-                self.Units = value
-            elif key == "sel_rect":
-                key, value = file_in.get_string (allow_blank=False)
-                self.SelectionRect = value
-            elif key == "ref_text":
-                key, value = file_in.get_string (allow_blank=False)
-                self.RefText = value
-            elif key == "value_text":
-                key, value = file_in.get_string (allow_blank=False)
-                self.ValText = value
-            elif key == "centroid":
-                key, value = file_in.get_string (allow_blank=False)
-                self.Centroid = value
-            elif key == "outline_polyline":
-                self.Graphics.append (Polyline.create_from_freepcb (file_in, opts))
-            elif key == "n_pins":
+        self.UserText = []
+
+        while not file_in.key == "name" and not file_in.at_end ():
+            #key = file_in.peek_key ()
+            if file_in.key == "units":
+                self.Units = file_in.value
+                file_in.get_string (allow_blank=False)
+            elif file_in.key == "sel_rect":
+                self.SelectionRect = file_in.value
+                file_in.get_string (allow_blank=False)
+            elif file_in.key == "ref_text":
+                self.RefText = file_in.value
+                file_in.get_string (allow_blank=False)
+            elif file_in.key == "value_text":
+                self.ValText = file_in.value
+                file_in.get_string (allow_blank=False)
+            elif file_in.key == "text":
+                # TODO self.ValText = file_in.value
+                self.UserText.append (file_in.value)
+                file_in.get_string (allow_blank=False)
+            elif file_in.key == "centroid":
+                self.Centroid = file_in.value
+                file_in.get_string (allow_blank=False)
+            elif file_in.key == "adhesive":
+                # ignored
+                file_in.get_string (allow_blank=False)
+            elif file_in.key == "outline_polyline":
+                self.Graphics.append (Polyline.create_from_freepcb (file_in, opts, self.Units))
+            elif file_in.key == "n_pins":
                 file_in.get_string (allow_blank=True) # Skip the n_pins line
-            elif key == "pin":
-                self.Graphics.append (Pin.create_from_freepcb (self.Name, file_in, opts))
+            elif file_in.key == "pin":
+                self.Graphics.append (Pin.create_from_freepcb (self.Name, file_in, opts, self.Units))
             else:
                 raise Exception ("Unexpected key \"%s\" on line %d."
-                        % (key, file_in.Lineno - 1))
+                        % (file_in.key, file_in.Lineno - 1))
 
         # Don't actually need this info, but check for it anyway just to
         # ensure the file format hasn't changed.
-        assert self.Units == "NM"
+        #assert self.Units == "NM"
+
         assert self.SelectionRect
         assert self.RefText
-        assert self.Centroid == "0 0 0 0"
+        # TODO
+        # assert self.Centroid == "0 0 0 0"
 
         self.tedit = time.time()
 
@@ -272,7 +299,8 @@ class PCBmodule (object):
 
         sexp.append ([S("descr"), str(self.Description)])
 
-        sexp.append ([S("attr"), S("smd")])
+        # todo:
+        # sexp.append ([S("attr"), S("smd")])
 
         sexp.append ([S("fp_text"),
             S("reference"), "REF**",
@@ -291,6 +319,20 @@ class PCBmodule (object):
                 [S("font"),
                     [S("size"), 0.5, 0.5],
                     [S("thickness"), 0.1]]]])
+
+        for t in self.UserText:
+            name, length = parse_string (t)
+            params = t[length:]
+            params = [i for i in params.split()]
+
+            sexp.append ([S("fp_text"),
+                S("user"), name,
+                [S("at"), to_mm(params[1], self.Units), -to_mm(params[2], self.Units) ],
+                [S("layer"), "F.SilkS"],
+                [S("effects"),
+                    [S("font"),
+                        [S("size"), to_mm(params[0], self.Units), to_mm(params[0], self.Units)],
+                        [S("thickness"), to_mm(params[4], self.Units)]]]])
 
         # Polylines
         for i in self.Graphics:
@@ -352,43 +394,50 @@ class Polyline (object):
         self.Closed = False
         self.Layer = "F.SilkS"
         self.KicadLinewidth = 0.15
+        self.Units = "NM"
 
     @classmethod
-    def create_from_freepcb (cls, file_in, opts):
+    def create_from_freepcb (cls, file_in, opts, units):
         self = cls ()
         self.opts = opts
+        self.Units = units
+
         # First point and line width
-        key, value = file_in.get_string (allow_blank=False)
-        assert key == "outline_polyline"
+        #key, value = file_in.get_string (allow_blank=False)
+        assert file_in.key == "outline_polyline"
+        value = file_in.value
         try:
-            value = [int(i) for i in value.split ()]
+            value = [float(i) for i in value.split ()]
         except ValueError:
-            raise Exception ("Line %d must contain a list of three integers."
+            raise Exception ("Line %d must contain a list of three values."
                 % (file_in.Lineno - 1))
         if len (value) != 3:
-            raise Exception ("Line %d must contain a list of three integers."
+            raise Exception ("Line %d must contain a list of three values."
                 % (file_in.Lineno - 1))
 
         self.Linewidth = 0.15#value[0]
         #print value[0]
-        self.Points.append (value[1:])
+        self.Points.append (value[1:]) 
 
         # Subsequent points
-        while file_in.peek_key () == "next_corner":
-            key, value = file_in.get_string (allow_blank=False)
+        key, value = file_in.get_string (allow_blank=False)
+
+        while key == "next_corner":
             assert key == "next_corner"
             try:
-                value = [int(i) for i in value.split ()]
+                value = [float(i) for i in value.split ()]
             except ValueError:
-                raise Exception ("Line %d must contain a list of three integers."
+                raise Exception ("Line %d must contain a list of three values."
                     % (file_in.Lineno - 1))
             if len (value) != 3:
-                raise Exception ("Line %d must contain a list of three integers."
+                raise Exception ("Line %d must contain a list of three values."
                     % (file_in.Lineno - 1))
             self.Points.append (value[:2])
             # Third number is "side style", which KiCad doesn't have.
 
-        if file_in.peek_key () == "close_polyline":
+            key, value = file_in.get_string (allow_blank=False)
+
+        if key == "close_polyline":
             file_in.get_string (allow_blank=False)
             self.Closed = True
             self.Points.append (self.Points[0])
@@ -407,8 +456,8 @@ class Polyline (object):
         last_corner = self.Points[0]
         for i in self.Points[1:]:
             sexp.append ([S("fp_line"),
-                [S("start"), to_mm (last_corner[0]), to_mm (-last_corner[1])],
-                [S("end"), to_mm (i[0]), to_mm (-i[1])],
+                [S("start"), to_mm (last_corner[0], self.Units), to_mm (-last_corner[1], self.Units)],
+                [S("end"), to_mm (i[0], self.Units), to_mm (-i[1], self.Units)],
                 [S("layer"), self.Layer],
                 [S("width"), self.KicadLinewidth]])
             last_corner = i
@@ -439,60 +488,76 @@ class Pin (object):
         self.InnerPad = None
         self.BottomPad = None
 
+        self.Units = "NM"
+
     @classmethod
-    def create_from_freepcb (cls, modname, file_in, opts):
+    def create_from_freepcb (cls, modname, file_in, opts, units):
         self = cls (modname)
 
         self.opts = opts
-        key, value = file_in.get_string (allow_blank=False)
-        assert key == "pin"
+        self.Units = units
 
-        self.Name, length = parse_string (value)
-        value = value[length:]
+        #key, value = file_in.get_string (allow_blank=False)
+        assert file_in.key == "pin"
+
+        self.Name, length = parse_string (file_in.value)
+        value = file_in.value[length:]
         try:
-            value = [int(i) for i in value.split ()]
+            value = [float(i) for i in value.split ()]
         except ValueError:
-            raise Exception ("Line %d must contain a list of four integers."
+            raise Exception ("Line %d must contain a list of four values."
                     % (file_in.Lineno - 1))
         if len (value) != 4:
-            raise Exception ("Line %d must contain a list of four integers."
+            raise Exception ("Line %d must contain a list of four values."
                     % (file_in.Lineno - 1))
 
         self.DrillDiam = value[0]
         self.Coords = value[1:3]
         self.Angle = value[3]
 
-        while file_in.peek_key ().endswith ("_pad"):
-            key, value = file_in.get_string (allow_blank=False)
-            if key == "top_pad":
-                self.TopPad = Pad (value, file_in)
-            elif key == "inner_pad":
-                self.InnerPad = Pad (value, file_in)
-            elif key == "bottom_pad":
-                self.BottomPad = Pad (value, file_in)
+        file_in.get_string (allow_blank=False)
+
+        while file_in.key.endswith ("_pad"):
+            
+            if file_in.key == "top_pad":
+                self.TopPad = Pad (file_in.value, file_in)
+            elif file_in.key == "inner_pad":
+                self.InnerPad = Pad (file_in.value, file_in)
+            elif file_in.key == "bottom_pad":
+                self.BottomPad = Pad (file_in.value, file_in)
             else:
                 raise Exception ("Unexpected key \"%s\" on line %d."
-                        % (key, file_in.Lineno - 1))
+                        % (file_in.key, file_in.Lineno - 1))
+
+            file_in.get_string (allow_blank=False)
         
         return self
 
     def __str__ (self):
         s = "Pin:\n" + \
-                "  Name: " + self.Name + "\n" + \
-                "  Drill diameter: " + str (self.DrillDiam) + "\n" + \
-                "  Angle: " + str (self.Angle) + "\n" + \
-                "  Coords: %d, %d\n" % tuple(self.Coords) + \
-                "  TopPad: " + str (self.TopPad) + "\n" + \
-                "  InnerPad: " + str (self.InnerPad) + "\n" + \
-                "  BottomPad: " + str (self.BottomPad) + "\n"
+                "  Name      : " + self.Name + "\n" + \
+                "  Drill diam: " + str (self.DrillDiam) + "\n" + \
+                "  Angle     : " + str (self.Angle) + "\n" + \
+                "  Coords    : %d, %d\n" % tuple(self.Coords) + \
+                "  TopPad    : " + str (self.TopPad) + "\n" + \
+                "  InnerPad  : " + str (self.InnerPad) + "\n" + \
+                "  BottomPad : " + str (self.BottomPad) + "\n"
         return s
 
     def kicad_sexp (self):
         """See Library.kicad_repr"""
 
+        if VERBOSE:
+            print (self)
+
         if self.DrillDiam == 0:
             # Surface mount
-            sx, sy = self.TopPad.Width, self.TopPad.Len1 + self.TopPad.Len2
+
+            if self.TopPad:
+                sx, sy = self.TopPad.Width, self.TopPad.Len1 + self.TopPad.Len2
+            else:
+                sx, sy = self.BottomPad.Width, self.BottomPad.Len1 + self.BottomPad.Len2
+
             if self.Angle == 90:
                 sx, sy = sy, sx
             else:
@@ -523,10 +588,10 @@ class Pin (object):
                 assert False
 
             # Output shape
-            sexp = [[S("pad"), self.Name, S("smd"), S(shape),
-                [S("at"), to_mm (self.Coords[0]), -to_mm (self.Coords[1])],
-                [S("size"), to_mm (sy), to_mm (sx)],
-                [S("layers"), "F.Cu", "F.Paste", "F.Mask"]]]
+            sexp = [ [S("pad"), self.Name, S("smd"), S(shape),
+                        [S("at"), to_mm (self.Coords[0], self.Units), -to_mm (self.Coords[1], self.Units)],
+                        [S("size"), to_mm (sy, self.Units), to_mm (sx, self.Units)],
+                        [S("layers"), "F.Cu", "F.Paste", "F.Mask"] ] ]
 
         else:
             # PTH
@@ -534,17 +599,24 @@ class Pin (object):
             if self.Angle == 90:
                 sx, sy = sy, sx
             else:
+                if sy == 0:
+                    sy = sx
                 assert self.Angle == 0
-            if self.Name == "1":
-                shape = "rect"
-            else:
-                shape = "circle"
+
+            #if self.Name == "1":
+            #    shape = "rect"
+            #else:
+            #    
+            shape = "circle"
 
             sexp = [[S("pad"), self.Name, S("thru_hole"), S(shape),
-                [S("at"), to_mm (self.Coords[0]), -to_mm (self.Coords[1])],
-                [S("size"), to_mm (sy), to_mm (sx)],
-                [S("drill"), to_mm (self.DrillDiam)],
+                [S("at"), to_mm (self.Coords[0], self.Units), -to_mm (self.Coords[1], self.Units)],
+                [S("size"), to_mm (sx, self.Units), to_mm (sy, self.Units)],
+                [S("drill"), to_mm (self.DrillDiam, self.Units)],
                 [S("layers"), "*.Cu", "*.Mask"]]]
+
+        if VERBOSE:
+            print (SexpDump (sexp, sys.stdout))
 
         return sexp
 
@@ -566,19 +638,23 @@ class Pin (object):
 class Pad (object):
     def __init__ (self, value, file_in):
         try:
-            value = [int(i) for i in value.split ()]
+            value = [float(i) for i in value.split ()]
         except ValueError:
-            raise Exception ("Line %d must contain a list of four or five integers."
+            raise Exception ("Line %d must contain a list of four or five values."
                     % (file_in.Lineno - 1))
-        if len (value) != 5 and len (value) != 4:
-            raise Exception ("Line %d must contain a list of four or five integers."
+
+        if len (value) < 4:
+            raise Exception ("Line %d must contain a list of at least four values."
                     % (file_in.Lineno - 1))
+
+        #if len (value) > 5:
+        #    print ("Warning: Line %d contains > 5 values." % (file_in.Lineno - 1))
 
         if len (value) == 4:
             # default corner radius
             value.append(0)
 
-        self.Shape, self.Width, self.Len1, self.Len2, self.CornRad = value
+        self.Shape, self.Width, self.Len1, self.Len2, self.CornRad = value[:5]
 
     def __str__ (self):
         return "Pad: shape %d, (w %d, L1 %d, L2 %d), corner %d" % \
@@ -592,6 +668,9 @@ class FreePCBfile (object):
         self.File.reverse ()
         self.Lineno = 1
 
+        self.key = ""
+        self.value = ""
+
     def get_string (self, allow_blank):
         # Retrieve a line of the format "key: value"
 
@@ -599,18 +678,23 @@ class FreePCBfile (object):
             self.File.pop ()
             self.Lineno += 1
 
-        assert len (self.File)
-        # Gobble blank lines
-        self.Lineno += 1
-        key, delim, value = self.File.pop ().partition (":")
-        key = key.strip ()
-        value = value.strip ()
-        if value.startswith ('"') and value.endswith ('"'):
-            value, throwaway = parse_string (value)
-        if not value:
-            raise Exception ("Line %d: expected value" % (self.Lineno - 1))
+        if len (self.File):
+            assert len (self.File)
+            # Gobble blank lines
+            self.Lineno += 1
 
-        return key, value
+            self.key, delim, self.value = self.File.pop ().partition (":")
+            self.key = self.key.strip ()
+            self.value = self.value.strip ()
+            if self.value.startswith ('"') and self.value.endswith ('"'):
+                self.value, throwaway = parse_string (self.value)
+            if not self.value:
+                raise Exception ("Line %d: expected value" % (self.Lineno - 1))
+        else:
+            self.key = "eof"
+            self.value = ""
+
+        return self.key, self.value
 
     def indent_level (self):
         # Get the current indentation level based on the current line, two
@@ -765,6 +849,7 @@ def main (args=None, zipfile=None):
     print ("Loading FreePCB library...")
     library = Library ()
     for filename in args.infile:
+        print (filename)
         f = open (filename)
         ff = FreePCBfile (f)
         sublibrary = Library (ff, args)
@@ -806,6 +891,9 @@ def main (args=None, zipfile=None):
     print ("Generating KiCad library...")
     for i in library.Modules:
         path = os.path.join (args.outdir, i.Name + '.kicad_mod')
+        print (path)
+        # sanitise the name
+        path = path.replace ("/", "_")
         with open (path, 'w') as f:
             sexp = i.kicad_sexp ()
             SexpDump (sexp, f)
