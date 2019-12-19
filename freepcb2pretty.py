@@ -61,7 +61,14 @@ VERSION="1.0"
 TEXT_SIZE = 1.
 TEXT_THICK = 0.2
 
-VERBOSE = 0
+VERBOSE = 1
+
+PAD_CIRCLE = 1
+PAD_SQUARE = 2
+PAD_RECT = 3
+PAD_RRECT = 4
+PAD_OVAL = 5
+PAD_OCT = 6
 
 class SexpSymbol (object):
     """An s-expression symbol. This is a bare text object which is exported
@@ -325,14 +332,21 @@ class PCBmodule (object):
             params = t[length:]
             params = [i for i in params.split()]
 
+            swidth = to_mm(params[0], self.Units) *len(name)
+            px = to_mm(params[1], self.Units) + swidth/2
+            py = -to_mm(params[2], self.Units) - to_mm(params[0], self.Units)/2
+
             sexp.append ([S("fp_text"),
                 S("user"), name,
-                [S("at"), to_mm(params[1], self.Units), -to_mm(params[2], self.Units) ],
+                [S("at"), px, py ],
                 [S("layer"), "F.SilkS"],
                 [S("effects"),
                     [S("font"),
                         [S("size"), to_mm(params[0], self.Units), to_mm(params[0], self.Units)],
-                        [S("thickness"), to_mm(params[4], self.Units)]]]])
+                        [S("thickness"), to_mm(params[4], self.Units)]]
+                    
+                    ]
+                ])
 
         # Polylines
         for i in self.Graphics:
@@ -558,10 +572,8 @@ class Pin (object):
             else:
                 sx, sy = self.BottomPad.Width, self.BottomPad.Len1 + self.BottomPad.Len2
 
-            if self.Angle == 90:
+            if self.Angle == 90 or self.Angle == 270:
                 sx, sy = sy, sx
-            else:
-                assert self.Angle == 0
 
             # Rounded pads
             can_round_pads = True
@@ -596,18 +608,28 @@ class Pin (object):
         else:
             # PTH
             sx, sy = self.TopPad.Width, self.TopPad.Len1 + self.TopPad.Len2
-            if self.Angle == 90:
+
+            if self.TopPad.Shape == PAD_CIRCLE or self.TopPad.Shape == PAD_SQUARE or self.TopPad.Shape == PAD_OCT:
+                sy = sx
+
+            if self.Angle == 90 or self.Angle == 270:
                 sx, sy = sy, sx
             else:
                 if sy == 0:
                     sy = sx
-                assert self.Angle == 0
 
             #if self.Name == "1":
             #    shape = "rect"
             #else:
             #    
-            shape = "circle"
+            if self.TopPad.Shape == PAD_CIRCLE or self.TopPad.Shape == PAD_OCT:
+                shape = "circle"
+            elif self.TopPad.Shape == PAD_SQUARE or self.TopPad.Shape == PAD_RECT:
+                shape = "rect"
+            elif self.TopPad.Shape == PAD_OVAL:
+                shape = "oval"
+            else:
+                shape = "circle"
 
             sexp = [[S("pad"), self.Name, S("thru_hole"), S(shape),
                 [S("at"), to_mm (self.Coords[0], self.Units), -to_mm (self.Coords[1], self.Units)],
