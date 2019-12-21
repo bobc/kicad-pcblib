@@ -22,7 +22,7 @@
 # Blank lines are ignored.
 
 # ROUNDED CENTER PADS EXCEPTIONS LIST:
-# This file worls just like the rounded pads exceptions list, except only
+# This file works just like the rounded pads exceptions list, except only
 # applies to pads located at the center of a part. This allows rounding all
 # pads except a thermal pad.
 
@@ -50,6 +50,7 @@ import time
 import sys
 import re
 import os.path
+import math
 
 try:
     unicode
@@ -61,14 +62,15 @@ VERSION="1.0"
 TEXT_SIZE = 1.
 TEXT_THICK = 0.2
 
-VERBOSE = 1
+VERBOSE = 0
 
-PAD_CIRCLE = 1
+PAD_NONE = 0
+PAD_ROUND = 1
 PAD_SQUARE = 2
 PAD_RECT = 3
 PAD_RRECT = 4
 PAD_OVAL = 5
-PAD_OCT = 6
+PAD_OCTAGON = 6
 
 class SexpSymbol (object):
     """An s-expression symbol. This is a bare text object which is exported
@@ -157,6 +159,33 @@ def from_mm (n):
     return float(n) * 1000000.
 
 
+class Point (object):
+
+    def __init__ (self, x, y):
+        self.x = x
+        self.y = y
+     
+    def __str__ (self):
+        s = "%d, %d" % (self.x, self.y)
+        return s
+
+    def __repr__ (self):
+        s = "%d, %d" % (self.x, self.y)
+        return s
+
+def kicad_arc_center (start, end, angle):
+    dx = end.x - start.x
+    dy = end.y - start.y
+
+    mid = Point (start.x + dx/2.0, start.y + dy/2.0)
+
+    dlen = math.sqrt(dx * dx + dy * dy)
+    dist = dlen / (2.0 * math.tan (math.radians(angle/2.0)))
+
+    center = Point (mid.x + dist * (dy/dlen), mid.y - dist * (dx/dlen))
+
+    return center
+
 class Library (object):
     def __init__ (self, file_in=None, opts=None):
         self.Modules = []
@@ -165,7 +194,7 @@ class Library (object):
         elif file_in is not None and opts is not None:
             self.opts = opts
 
-            file_in.get_string (allow_blank=False)
+            file_in.get_string ()
             while not file_in.at_end ():
                 self.Modules.append (PCBmodule (file_in, opts))
         else:
@@ -189,6 +218,46 @@ class Library (object):
         for i in self.Modules:
             i.strip_lmn ()
 
+class TextProperties (object):
+    def __init__ (self, _units, _type, _str):
+        """Text properties."""
+
+        self.Units = _units
+        self.TextType = _type  # reference ,value or user
+        self.Str = _str
+
+        self.x = 0
+        self.y = 0
+        self.Height = 1.27
+        self.Angle = 0
+        self.LineWidth = 0.15
+
+        self.Mirrored = False
+        self.LayerNo = 0
+        self.Layer = "F.SilkS"
+
+        # 4, "F.SilkS"
+
+    def kicad_sexp (self):
+
+        # adjust position to hcenter,vcenter justification for KiCad
+        swidth = to_mm(self.Height, self.Units) * len(self.Str)
+        px =  to_mm(self.x, self.Units) + swidth/2
+        py = -to_mm(self.y, self.Units) - to_mm(self.Height, self.Units)/2
+
+        sexp = ([S("fp_text"),
+                S(self.TextType), self.Str,
+                [S("at"), px, py ],
+                [S("layer"), self.Layer],
+                [S("effects"),
+                    [S("font"),
+                        [S("size"), to_mm(self.Height, self.Units), to_mm(self.Height, self.Units)],
+                        [S("thickness"), to_mm(self.LineWidth, self.Units)]]
+                    ]
+                ])
+
+        return sexp
+
 class PCBmodule (object):
     def __init__ (self, file_in, opts):
         """Read out the footprint from the FreePCB module."""
@@ -201,14 +270,11 @@ class PCBmodule (object):
         self.ThreeDOffset = [0.0, 0.0, 0.0]
         self.ThreeDRot = [0.0, 0.0, 0.0]
 
-
-        # Pre-indent data
+        # 
         self.Name = ""
         self.Author = ""
         self.Source = ""
         self.Description = ""
-
-        # key, value = file_in.get_string (allow_blank=False)
 
         while not file_in.key == "units" and not file_in.at_end ():
             if file_in.key == "name":
@@ -222,51 +288,79 @@ class PCBmodule (object):
             else:
                 raise Exception ("Unexpected key \"%s\" on line %d."
                         % (file_in.key, file_in.Lineno - 1))
-            file_in.get_string (allow_blank=False)
+            file_in.get_string ()
                 
         assert self.Name
-        #assert self.Author
-        #assert self.Source
-        #assert self.Description
 
-        # Post-indent data
+        # 
         self.Units = None
         self.SelectionRect = None
         self.RefText = None
-        self.ValText = ""
+        self.ValText = None
         self.Centroid = "0 0 0 0"
         self.Graphics = []
-
         self.UserText = []
 
         while not file_in.key == "name" and not file_in.at_end ():
-            #key = file_in.peek_key ()
             if file_in.key == "units":
                 self.Units = file_in.value
-                file_in.get_string (allow_blank=False)
+                file_in.get_string ()
             elif file_in.key == "sel_rect":
                 self.SelectionRect = file_in.value
-                file_in.get_string (allow_blank=False)
+                file_in.get_string ()
             elif file_in.key == "ref_text":
-                self.RefText = file_in.value
-                file_in.get_string (allow_blank=False)
+                self.RefText = TextProperties(self.Units, "reference", "REF**")
+
+                params = [i for i in file_in.value.split()]
+                self.RefText.Height = params[0]
+                self.RefText.x = params[1]
+                self.RefText.y = params[2]
+                self.RefText.Angle = params[3]
+                self.RefText.LineWidth = params[4]
+
+                file_in.get_string ()
             elif file_in.key == "value_text":
-                self.ValText = file_in.value
-                file_in.get_string (allow_blank=False)
+                self.ValText = TextProperties(self.Units, "value", self.Name)
+
+                #
+                params = [i for i in file_in.value.split()]
+                self.ValText.Height = params[0]
+                self.ValText.x = params[1]
+                self.ValText.y = params[2]
+                self.ValText.Angle = params[3]
+                self.ValText.LineWidth = params[4]
+
+                file_in.get_string ()
             elif file_in.key == "text":
-                # TODO self.ValText = file_in.value
-                self.UserText.append (file_in.value)
-                file_in.get_string (allow_blank=False)
+                # TODO 
+                t = file_in.value
+                name, length = parse_string (t)
+                text = TextProperties (self.Units, "user", name)
+                params = t[length:]
+                params = [i for i in params.split()]
+
+                text.Height = params[0]
+                text.x = params[1]
+                text.y = params[2]
+                text.Angle = params[3]
+                text.LineWidth = params[4]
+
+                text.Mirrored = params[5]
+                text.LayerNo = params[6]
+
+                self.UserText.append (text)
+
+                file_in.get_string ()
             elif file_in.key == "centroid":
                 self.Centroid = file_in.value
-                file_in.get_string (allow_blank=False)
+                file_in.get_string ()
             elif file_in.key == "adhesive":
                 # ignored
-                file_in.get_string (allow_blank=False)
+                file_in.get_string ()
             elif file_in.key == "outline_polyline":
                 self.Graphics.append (Polyline.create_from_freepcb (file_in, opts, self.Units))
             elif file_in.key == "n_pins":
-                file_in.get_string (allow_blank=True) # Skip the n_pins line
+                file_in.get_string () # Skip the n_pins line
             elif file_in.key == "pin":
                 self.Graphics.append (Pin.create_from_freepcb (self.Name, file_in, opts, self.Units))
             else:
@@ -275,7 +369,6 @@ class PCBmodule (object):
 
         # Don't actually need this info, but check for it anyway just to
         # ensure the file format hasn't changed.
-        #assert self.Units == "NM"
 
         assert self.SelectionRect
         assert self.RefText
@@ -306,47 +399,17 @@ class PCBmodule (object):
 
         sexp.append ([S("descr"), str(self.Description)])
 
-        # todo:
+        # todo: detect if footprint is smd or th type
         # sexp.append ([S("attr"), S("smd")])
 
-        sexp.append ([S("fp_text"),
-            S("reference"), "REF**",
-            [S("at"), 0, 0],
-            [S("layer"), "F.SilkS"],
-            [S("effects"),
-                [S("font"),
-                    [S("size"), 0.8, 0.8],
-                    [S("thickness"), 0.15]]]])
+        if self.RefText:
+            sexp.append (self.RefText.kicad_sexp())
 
-        sexp.append ([S("fp_text"),
-            S("value"), self.Name,
-            [S("at"), 0, 0],
-            [S("layer"), "F.Fab"],
-            [S("effects"),
-                [S("font"),
-                    [S("size"), 0.5, 0.5],
-                    [S("thickness"), 0.1]]]])
-
+        if self.ValText:
+            sexp.append (self.ValText.kicad_sexp())
+            
         for t in self.UserText:
-            name, length = parse_string (t)
-            params = t[length:]
-            params = [i for i in params.split()]
-
-            swidth = to_mm(params[0], self.Units) *len(name)
-            px = to_mm(params[1], self.Units) + swidth/2
-            py = -to_mm(params[2], self.Units) - to_mm(params[0], self.Units)/2
-
-            sexp.append ([S("fp_text"),
-                S("user"), name,
-                [S("at"), px, py ],
-                [S("layer"), "F.SilkS"],
-                [S("effects"),
-                    [S("font"),
-                        [S("size"), to_mm(params[0], self.Units), to_mm(params[0], self.Units)],
-                        [S("thickness"), to_mm(params[4], self.Units)]]
-                    
-                    ]
-                ])
+            sexp.append (t.kicad_sexp())
 
         # Polylines
         for i in self.Graphics:
@@ -385,16 +448,18 @@ class PCBmodule (object):
 
     def add_courtyard (self, spacing):
         left, right, top, bottom = self.bounding_box ()
-        left -= from_mm (spacing)
-        right += from_mm (spacing)
-        top += from_mm (spacing)
-        bottom -= from_mm (spacing)
+
+        left  -= spacing
+        right += spacing
+        top    += spacing
+        bottom -= spacing
 
         cy = Polyline ()
-        cy.Points = [(left, top), (right, top), (right, bottom), (left, bottom),
-                (left, top)]
-        cy.KicadLinewidth = 0.05
+        cy.Points = [(left, top), (right, top), (right, bottom), (left, bottom), (left, top)]
+        cy.Style= [0,0,0,0]
+        cy.Linewidth = 0.05
         cy.Layer = "F.CrtYd"
+        cy.Units = "MM"
 
         self.Graphics.append (cy)
 
@@ -404,10 +469,10 @@ class Polyline (object):
 
         self.opts = None
         self.Points = []
+        self.Style = []
         self.Linewidth = None
         self.Closed = False
         self.Layer = "F.SilkS"
-        self.KicadLinewidth = 0.15
         self.Units = "NM"
 
     @classmethod
@@ -417,7 +482,6 @@ class Polyline (object):
         self.Units = units
 
         # First point and line width
-        #key, value = file_in.get_string (allow_blank=False)
         assert file_in.key == "outline_polyline"
         value = file_in.value
         try:
@@ -429,12 +493,11 @@ class Polyline (object):
             raise Exception ("Line %d must contain a list of three values."
                 % (file_in.Lineno - 1))
 
-        self.Linewidth = 0.15#value[0]
-        #print value[0]
+        self.Linewidth = value[0]
         self.Points.append (value[1:]) 
 
         # Subsequent points
-        key, value = file_in.get_string (allow_blank=False)
+        key, value = file_in.get_string ()
 
         while key == "next_corner":
             assert key == "next_corner"
@@ -447,12 +510,13 @@ class Polyline (object):
                 raise Exception ("Line %d must contain a list of three values."
                     % (file_in.Lineno - 1))
             self.Points.append (value[:2])
-            # Third number is "side style", which KiCad doesn't have.
+            # Third number is "side style"
+            self.Style.append (value[2])
 
-            key, value = file_in.get_string (allow_blank=False)
+            key, value = file_in.get_string ()
 
         if key == "close_polyline":
-            file_in.get_string (allow_blank=False)
+            file_in.get_string ()
             self.Closed = True
             self.Points.append (self.Points[0])
         return self
@@ -468,13 +532,37 @@ class Polyline (object):
 
         sexp = []
         last_corner = self.Points[0]
+
+        j = 0
         for i in self.Points[1:]:
-            sexp.append ([S("fp_line"),
-                [S("start"), to_mm (last_corner[0], self.Units), to_mm (-last_corner[1], self.Units)],
-                [S("end"), to_mm (i[0], self.Units), to_mm (-i[1], self.Units)],
-                [S("layer"), self.Layer],
-                [S("width"), self.KicadLinewidth]])
+            if self.Style[j] == 0:
+                sexp.append ([S("fp_line"),
+                    [S("start"), to_mm (last_corner[0], self.Units), to_mm (-last_corner[1], self.Units)],
+                    [S("end"), to_mm (i[0], self.Units), to_mm (-i[1], self.Units)],
+                    [S("layer"), self.Layer],
+                    [S("width"), to_mm(self.Linewidth, self.Units)]])
+            else:
+                if self.Style[j] == 1:
+                    angle = -90
+                else:
+                    angle = 90
+
+                p1 = Point(last_corner[0], last_corner[1])
+                p1.y = -p1.y
+                p2 = Point(i[0], i[1])
+                p2.y = -p2.y
+                center = kicad_arc_center (p1, p2, angle)
+
+                sexp.append ([S("fp_arc"),
+                    [S("start"), to_mm (center.x, self.Units), to_mm (center.y, self.Units)],
+                    [S("end"), to_mm (p1.x, self.Units), to_mm (p1.y, self.Units)],
+                    [S("angle"), -angle],
+                    [S("layer"), self.Layer],
+                    [S("width"), to_mm(self.Linewidth,self.Units)]])
+
             last_corner = i
+            if j  < len(self.Style)-1:
+                j = j + 1
 
         return sexp
 
@@ -484,6 +572,12 @@ class Polyline (object):
         right = max (i[0] for i in self.Points)
         top = max (i[1] for i in self.Points)
         bottom = min (i[1] for i in self.Points)
+
+        left = to_mm (left, self.Units)
+        right = to_mm (right, self.Units)
+        top = to_mm (top, self.Units)
+        bottom = to_mm (bottom, self.Units)
+
         return (left, right, top, bottom) 
 
 class Pin (object):
@@ -511,7 +605,6 @@ class Pin (object):
         self.opts = opts
         self.Units = units
 
-        #key, value = file_in.get_string (allow_blank=False)
         assert file_in.key == "pin"
 
         self.Name, length = parse_string (file_in.value)
@@ -529,9 +622,9 @@ class Pin (object):
         self.Coords = value[1:3]
         self.Angle = value[3]
 
-        file_in.get_string (allow_blank=False)
+        file_in.get_string ()
 
-        while file_in.key.endswith ("_pad"):
+        while file_in.key in ["top_pad", "inner_pad", "bottom_pad", "top_mask", "top_paste", "bottom_mask", "bottom_paste" ]:
             
             if file_in.key == "top_pad":
                 self.TopPad = Pad (file_in.value, file_in)
@@ -539,11 +632,14 @@ class Pin (object):
                 self.InnerPad = Pad (file_in.value, file_in)
             elif file_in.key == "bottom_pad":
                 self.BottomPad = Pad (file_in.value, file_in)
+            elif file_in.key in ["top_mask", "top_paste", "bottom_mask", "bottom_paste"]:
+                # todo
+                pass
             else:
                 raise Exception ("Unexpected key \"%s\" on line %d."
                         % (file_in.key, file_in.Lineno - 1))
 
-            file_in.get_string (allow_blank=False)
+            file_in.get_string ()
         
         return self
 
@@ -568,9 +664,15 @@ class Pin (object):
             # Surface mount
 
             if self.TopPad:
+                ref_pad = self.TopPad
                 sx, sy = self.TopPad.Width, self.TopPad.Len1 + self.TopPad.Len2
+                if self.TopPad.Shape == PAD_ROUND or self.TopPad.Shape == PAD_SQUARE or self.TopPad.Shape == PAD_OCTAGON:
+                    sy = sx
             else:
+                ref_pad = self.BottomPad
                 sx, sy = self.BottomPad.Width, self.BottomPad.Len1 + self.BottomPad.Len2
+                if self.BottomPad.Shape == PAD_ROUND or self.BottomPad.Shape == PAD_SQUARE or self.BottomPad.Shape == PAD_OCTAGON:
+                    sy = sx
 
             if self.Angle == 90 or self.Angle == 270:
                 sx, sy = sy, sx
@@ -586,7 +688,16 @@ class Pin (object):
                     can_round_center = False
 
             if self.opts.roundedpads is None:
-                shape = "rect"
+                if ref_pad.Shape == PAD_ROUND or ref_pad.Shape == PAD_OCTAGON:
+                    shape = "circle"
+                elif ref_pad.Shape == PAD_SQUARE or ref_pad.Shape == PAD_RECT:
+                    shape = "rect"
+                elif ref_pad.Shape == PAD_RRECT:
+                    shape = "roundrect"
+                elif ref_pad.Shape == PAD_OVAL:
+                    shape = "oval"
+                else:
+                    shape = "rect"
             elif not can_round_center and (0, 0) == tuple (self.Coords):
                 shape = "rect"
             elif self.opts.roundedpads == "all":
@@ -600,6 +711,7 @@ class Pin (object):
                 assert False
 
             # Output shape
+            # TODO: if bottom pad
             sexp = [ [S("pad"), self.Name, S("smd"), S(shape),
                         [S("at"), to_mm (self.Coords[0], self.Units), -to_mm (self.Coords[1], self.Units)],
                         [S("size"), to_mm (sy, self.Units), to_mm (sx, self.Units)],
@@ -609,7 +721,7 @@ class Pin (object):
             # PTH
             sx, sy = self.TopPad.Width, self.TopPad.Len1 + self.TopPad.Len2
 
-            if self.TopPad.Shape == PAD_CIRCLE or self.TopPad.Shape == PAD_SQUARE or self.TopPad.Shape == PAD_OCT:
+            if self.TopPad.Shape == PAD_ROUND or self.TopPad.Shape == PAD_SQUARE or self.TopPad.Shape == PAD_OCTAGON:
                 sy = sx
 
             if self.Angle == 90 or self.Angle == 270:
@@ -618,24 +730,35 @@ class Pin (object):
                 if sy == 0:
                     sy = sx
 
-            #if self.Name == "1":
-            #    shape = "rect"
-            #else:
-            #    
-            if self.TopPad.Shape == PAD_CIRCLE or self.TopPad.Shape == PAD_OCT:
+            if self.TopPad.Shape == PAD_ROUND or self.TopPad.Shape == PAD_OCTAGON:
                 shape = "circle"
             elif self.TopPad.Shape == PAD_SQUARE or self.TopPad.Shape == PAD_RECT:
                 shape = "rect"
+            elif self.TopPad.Shape == PAD_RRECT:
+                shape = "roundrect"
             elif self.TopPad.Shape == PAD_OVAL:
                 shape = "oval"
             else:
                 shape = "circle"
 
-            sexp = [[S("pad"), self.Name, S("thru_hole"), S(shape),
-                [S("at"), to_mm (self.Coords[0], self.Units), -to_mm (self.Coords[1], self.Units)],
-                [S("size"), to_mm (sx, self.Units), to_mm (sy, self.Units)],
-                [S("drill"), to_mm (self.DrillDiam, self.Units)],
-                [S("layers"), "*.Cu", "*.Mask"]]]
+            if self.TopPad.Shape == PAD_NONE and self.BottomPad.Shape == PAD_NONE:
+                _type = "np_thru_hole"
+                sx = self.DrillDiam
+                sy = sx
+                sexp = [[S("pad"), self.Name, S(_type), S(shape),
+                    [S("at"), to_mm (self.Coords[0], self.Units), -to_mm (self.Coords[1], self.Units)],
+                    [S("size"), to_mm (sx, self.Units), to_mm (sy, self.Units)],
+                    [S("drill"), to_mm (self.DrillDiam, self.Units)],
+                    [S("layers"), "*.Mask"]]]
+            else:
+                _type = "thru_hole"
+                sexp = [[S("pad"), self.Name, S(_type), S(shape),
+                    [S("at"), to_mm (self.Coords[0], self.Units), -to_mm (self.Coords[1], self.Units)],
+                    [S("size"), to_mm (sx, self.Units), to_mm (sy, self.Units)],
+                    [S("drill"), to_mm (self.DrillDiam, self.Units)],
+                    [S("layers"), "*.Cu", "*.Mask"]]]
+
+
 
         if VERBOSE:
             print (SexpDump (sexp, sys.stdout))
@@ -644,16 +767,31 @@ class Pin (object):
 
     def bounding_box (self):
         """Return a (left, right, top, bottom) bounding box"""
-        sx, sy = self.TopPad.Width, self.TopPad.Len1 + self.TopPad.Len2
-        if self.Angle == 90:
-            sx, sy = sy, sx
-        else:
-            assert self.Angle == 0
 
-        left = self.Coords[0] - (sy / 2)
-        right = self.Coords[0] + (sy / 2)
-        top = self.Coords[1] + (sx / 2)
-        bottom = self.Coords[1] - (sx / 2)
+        if self.TopPad:
+            sx, sy = self.TopPad.Width, self.TopPad.Len1 + self.TopPad.Len2
+        else:
+            sx, sy = self.BottomPad.Width, self.BottomPad.Len1 + self.BottomPad.Len2
+
+        if sy == 0:
+            sy = sx
+
+        if self.Angle == 90 or self.Angle == 270:
+            sx, sy = sy, sx
+
+        if self.DrillDiam == 0:
+            sx, sy = sy, sx
+
+        left  = self.Coords[0] - (sx / 2)
+        right = self.Coords[0] + (sx / 2)
+
+        top    = self.Coords[1] + (sy / 2)
+        bottom = self.Coords[1] - (sy / 2)
+
+        left   = to_mm (left, self.Units)
+        right  = to_mm (right, self.Units)
+        top    = to_mm (top, self.Units)
+        bottom = to_mm (bottom, self.Units)
 
         return (left, right, top, bottom)
 
@@ -693,7 +831,7 @@ class FreePCBfile (object):
         self.key = ""
         self.value = ""
 
-    def get_string (self, allow_blank):
+    def get_string (self, allow_blank = True):
         # Retrieve a line of the format "key: value"
 
         while self.File and not self.File[-1].strip ():
@@ -754,7 +892,7 @@ def process_3dmap (mapfile, library):
     ff = FreePCBfile (f) # Exploit the format to reuse a parser
     current_module = None
     while not ff.at_end ():
-        key, value = ff.get_string (allow_blank=False)
+        key, value = ff.get_string ()
         if key == "mod":
             for i in library.Modules:
                 if i.Name == value:
@@ -805,10 +943,8 @@ def main (args=None, zipfile=None):
     p.add_argument ("-v", "--version", action="version",
             version="%(prog)s " + VERSION)
 
-    p.add_argument ("outdir", metavar="DIR", type=str,
-            help="Output directory")
-    p.add_argument ("infile", metavar="FILE", type=str, nargs='*',
-        help="FreePCB-format input(s)")
+    p.add_argument ("outdir", metavar="DIR", type=str,              help="Output directory")
+    p.add_argument ("infile", metavar="FILE", type=str, nargs='*',  help="FreePCB-format input(s)")
     blurbp = p.add_mutually_exclusive_group ()
     blurbp.add_argument ("--blurb", dest="blurb", action="store_const",
             const=True, default=False,
@@ -816,31 +952,26 @@ def main (args=None, zipfile=None):
             " comments (default: no)")
     blurbp.add_argument ("--no-blurb", dest="blurb", action="store_const",
             const=False, default=False)
-    p.add_argument ("--3dmap", dest="threedmap", type=str,
-            help="File mapping PCB modules to 3D models. See source code " + \
-                    "(comments in header) for documentation.")
+
+    p.add_argument ("--3dmap", dest="threedmap", type=str,          help="File mapping PCB modules to 3D models. See source code " + \
+                                                                         "(comments in header) for documentation.")
     roundp = p.add_mutually_exclusive_group ()
     roundp.add_argument ("--rounded-pads", dest="roundedpads",
-            action="store_const", const="all", default=None,
-            help="Round all corners of square pads")
+            action="store_const", const="all", default=None,        help="Round all corners of square pads")
     roundp.add_argument ("--rounded-except-1", dest="roundedpads",
-            action="store_const", const="allbut1", default=None,
-            help="Round all corners of square pads, except pad 1")
+            action="store_const", const="allbut1", default=None,    help="Round all corners of square pads, except pad 1")
     p.add_argument ("--rounded-pad-exceptions", dest="rpexcept", type=str,
-            help="Exceptions list for rounded pads. See source code " + \
-                    "(comments in header) for documentation.")
+                                                                    help="Exceptions list for rounded pads. See source code " + \
+                                                                         "(comments in header) for documentation.")
     p.add_argument ("--rounded-center-exceptions", dest="rcexcept", type=str,
-            help="Exceptions list for rounded center pads. See source code " + \
-                    "(comments in header) for documentation.")
+                                                                    help="Exceptions list for rounded center pads. See source code " + \
+                                                                            "(comments in header) for documentation.")
     p.add_argument ("--strip-lmn", dest="strip_lmn", action="store_const",
-            const=True, default=False,
-            help="Strip final L/M/N specifiers from names")
+            const=True, default=False,                              help="Strip final L/M/N specifiers from names")
     p.add_argument ("--add-courtyard", dest="courtyard", type=float,
-            default=None,
-            help="Add a courtyard a fixed number of mm outside the bounding box")
+            default=None,                                           help="Add a courtyard a fixed number of mm outside the bounding box")
     p.add_argument ("--hash-time", dest="hashtime", action="store_const",
-            const=True, default=False,
-            help="Set a fake edit time on the footprints using a hash")
+            const=True, default=False,                              help="Set a fake edit time on the footprints using a hash")
     args = p.parse_args (args)
 
     # Parse rounded pads exceptions file?
